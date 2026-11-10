@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import argparse
 import concurrent.futures
 import importlib
@@ -131,6 +132,66 @@ def _load_modules():
     return loaded
 
 
+# ── klasifikasi hasil ───────────────────────────────────────────────────
+
+def _classify_result(result):
+    """
+    Klasifikasi hasil modul jadi: "vuln", "safe", "error".
+
+    suspect / versi rentan / belum exploit -> SAFE (bukan VULN).
+    """
+    reason = (result.get("reason") or "").lower()
+    evidence = (result.get("evidence") or "").lower()
+    vulnerable = bool(result.get("vulnerable"))
+
+    blob = reason + " " + evidence
+
+    suspect_markers = (
+        "suspect",
+        "not exploited",
+        "not_exploited",
+        "unexploited",
+        "version_only",
+        "no_privesc",
+        "not_confirmed",
+        "version in vulnerable range",
+        "vulnerable_version_detected",
+        "vulnerable_version_suspect",
+        "version_unknown",
+        "need_auth",
+        "auth_failed",
+        "upload_failed",
+        "rename_failed",
+        "rename accepted",
+        "rename_accepted",
+        "shell_not_found",
+        "upload_ok_but_verify_failed",
+        "component_no_route",
+        "component_present_sqli_unconfirmed",
+        "endpoint_not_reachable",
+        "endpoint_present_suspect",
+        "sppb_present",
+        "sppagebuilder_present",
+        "bricksforge_present",
+        "version_unknown_suspect",
+    )
+    is_suspect = any(m in blob for m in suspect_markers)
+
+    # suspect -> SAFE (belum terbukti exploit)
+    if is_suspect:
+        return "safe"
+
+    if vulnerable:
+        return "vuln"
+
+    if reason.startswith(("exception", "unreachable", "error_",
+                          "client_init_error", "unexpected_error",
+                          "cannot_reach")):
+        return "error"
+
+    return "safe"
+
+
 # ── core scan (satu target) ─────────────────────────────────────────────
 
 def scan_target(target_url, modules, timeout=20, only_cve=None):
@@ -167,22 +228,19 @@ def scan_target(target_url, modules, timeout=20, only_cve=None):
             continue
 
         dt = time.time() - t0
-        if result.get("vulnerable"):
-            checks.append({
-                "cve": cve_id, "status": "vulnerable",
-                "reason": result.get("reason", ""),
-                "evidence": result.get("evidence"),
-                "raw": result, "elapsed": dt,
-            })
+        status = _classify_result(result)
+
+        checks.append({
+            "cve": cve_id, "status": status,
+            "reason": result.get("reason", ""),
+            "evidence": result.get("evidence"),
+            "raw": result, "elapsed": dt,
+        })
+
+        if status == "vuln":
             return {"target": target_url, "status": "vulnerable",
                     "cve": cve_id, "evidence": result.get("evidence"),
                     "elapsed": time.time() - start, "checks": checks}
-
-        checks.append({
-            "cve": cve_id, "status": "safe",
-            "reason": result.get("reason", ""),
-            "raw": result, "elapsed": dt,
-        })
 
     return {"target": target_url, "status": "safe", "cve": None,
             "evidence": None, "elapsed": time.time() - start,
@@ -216,7 +274,7 @@ def print_summary(results, elapsed):
     print(f"  elapsed      : {elapsed:.2f}s")
     if n_vuln:
         print()
-        print(bold("  TARGET VULNERABLE:"))
+        print(bold("  TARGET VULNERABLE (exploit terbukti):"))
         for r in results:
             if r["status"] == "vulnerable":
                 print(f"    - {r['target']}  "
@@ -227,9 +285,9 @@ def print_summary(results, elapsed):
 def write_result_file(results, elapsed, path="result.txt"):
     """Tulis hasil scan ke file teks. Vulnerable ditaruh paling atas."""
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    n_vuln = sum(1 for r in results if r["status"] == "vulnerable")
-    n_safe = sum(1 for r in results if r["status"] == "safe")
-    n_err = sum(1 for r in results if r["status"] == "error")
+    vulns = [r for r in results if r["status"] == "vulnerable"]
+    safes = [r for r in results if r["status"] == "safe"]
+    errors = [r for r in results if r["status"] == "error"]
 
     lines = []
     lines.append("=" * 60)
@@ -237,29 +295,39 @@ def write_result_file(results, elapsed, path="result.txt"):
     lines.append("=" * 60)
     lines.append(f"Scan finished : {started}")
     lines.append(f"Total target  : {len(results)}")
-    lines.append(f"Vulnerable    : {n_vuln}")
-    lines.append(f"Safe          : {n_safe}")
-    lines.append(f"Error         : {n_err}")
+    lines.append(f"Vulnerable    : {len(vulns)}")
+    lines.append(f"Safe          : {len(safes)}")
+    lines.append(f"Error         : {len(errors)}")
     lines.append(f"Elapsed       : {elapsed:.2f}s")
     lines.append("=" * 60)
     lines.append("")
 
-    # vulnerable dulu
-    for r in results:
-        if r["status"] != "vulnerable":
-            continue
-        lines.append(f"[VULN] {r['target']}")
-        lines.append(f"  CVE      : {r['cve']}")
-        lines.append(f"  Evidence : {r['evidence'] or ''}")
-        lines.append(f"  Time     : {r['elapsed']:.2f}s")
+    if vulns:
+        lines.append("─" * 60)
+        lines.append("  [VULNERABLE] — exploit terbukti")
+        lines.append("─" * 60)
+        for r in vulns:
+            lines.append(f"[VULN] {r['target']}")
+            lines.append(f"  CVE      : {r['cve']}")
+            lines.append(f"  Evidence : {r['evidence'] or ''}")
+            lines.append(f"  Time     : {r['elapsed']:.2f}s")
+            lines.append("")
+
+    if safes:
+        lines.append("─" * 60)
+        lines.append("  [SAFE]")
+        lines.append("─" * 60)
+        for r in safes:
+            lines.append(f"[SAFE] {r['target']}")
         lines.append("")
 
-    # sisanya ringkas
-    for r in results:
-        if r["status"] == "safe":
-            lines.append(f"[SAFE] {r['target']}")
-        elif r["status"] == "error":
+    if errors:
+        lines.append("─" * 60)
+        lines.append("  [ERROR]")
+        lines.append("─" * 60)
+        for r in errors:
             lines.append(f"[ERR ] {r['target']}  ({r['evidence']})")
+        lines.append("")
 
     try:
         with open(path, "w", encoding="utf-8") as fh:
