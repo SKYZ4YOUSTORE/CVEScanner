@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-CVE Scanner — mass sequential multi-CVE checker.
-
-Mode:
-  - single : scan satu URL
-  - mass   : scan banyak URL dari file .txt (threaded)
-
-Alur per target (tetap sequential per-CVE):
-  target -> CVE #1 -> vulnerable? STOP untuk target ini
-         -> aman?       lanjut CVE #2
-         -> ... sampai habis
-
-Nambah CVE baru: tinggal tambah 1 baris di CVE_REGISTRY.
-"""
-
 import argparse
 import concurrent.futures
 import importlib
